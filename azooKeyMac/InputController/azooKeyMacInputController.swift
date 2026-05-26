@@ -36,6 +36,18 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
     private static let doubleTapInterval: TimeInterval = 0.5
     private static let candidateWindowInitialSize = CGSize(width: 400, height: 1000)
 
+    // Shiftキーの動作が「英字モードに入る」用
+    var romajiModeEnabled: Bool {
+        Config.ShiftKeyAction().value == .romajimode
+    }
+    private var romajiMode: Bool = false
+    private var isRomajiModeActive: Bool {
+        self.romajiMode && self.inputLanguage == .english
+    }
+    private var shiftKeyDownTime: TimeInterval = 0
+    private var shiftKeyUsedAsModifier: Bool = false
+    private static let shiftAloneTapMaxDuration: TimeInterval = 0.3 // シングルタップなのでダブルタップより短く
+
     // ピン留めプロンプトのキャッシュ（パフォーマンス向上のため）
     private var pinnedPromptsCache: [PromptHistoryItem] = []
 
@@ -160,6 +172,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         // ピン留めプロンプトのキャッシュを更新
         self.reloadPinnedPromptsCache()
         self.segmentsManager.activate()
+        self.romajiMode = false
 
         if let client = sender as? IMKTextInput {
             client.overrideKeyboard(withKeyboardNamed: Config.KeyboardLayout().value.layoutIdentifier)
@@ -179,6 +192,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
 
     @MainActor
     override func deactivateServer(_ sender: Any!) {
+        self.romajiMode = false
         self.segmentsManager.deactivate()
         self.candidatesWindow.orderOut(nil)
         self.predictionWindow.orderOut(nil)
@@ -201,6 +215,11 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         let text = self.segmentsManager.commitMarkedText(inputState: self.inputState)
         if let client = sender as? IMKTextInput {
             client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            if self.isRomajiModeActive {
+                self.switchInputLanguage(.japanese, client: client)
+            }
+        } else {
+            self.romajiMode = false
         }
         self.inputState = .none
         self.refreshMarkedText()
@@ -225,6 +244,7 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
                 // composing中でも英数キーMarkedTextを保ったまま英語入力へ移る。
                 if self.inputLanguage == .japanese {
                     self.inputLanguage = .english
+                    self.romajiMode = false
                     self.segmentsManager.stopJapaneseInput()
                     self.refreshCandidateWindow()
                     self.refreshPredictionWindow()
@@ -233,13 +253,15 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
                 // 日本語モードへの切り替え
                 if self.inputLanguage == .english {
                     self.inputLanguage = .japanese
+                    self.romajiMode = false
                     let (clientAction, clientActionCallback) = self.inputState.event(
                         eventCore: .init(modifierFlags: [], characters: nil, charactersIgnoringModifiers: nil, keyCode: 0x00),
                         userAction: .かな,
                         inputLanguage: self.inputLanguage,
                         liveConversionEnabled: false,
                         enableDebugWindow: false,
-                        enableSuggestion: false
+                        enableSuggestion: false,
+                        romajiMode: self.romajiMode
                     )
                     _ = self.handleClientAction(
                         clientAction,
@@ -255,13 +277,60 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         self.appMenu
     }
 
+    // Shift単押し検出のため flagsChanged を追加
+    override func recognizedEvents(_ sender: Any!) -> Int {
+        let flags: NSEvent.EventTypeMask = [.keyDown, .flagsChanged]
+        return Int(flags.rawValue)
+    }
+
+    // Shift単押し検出
+    @MainActor
+    private func handleFlagsChanged(_ event: NSEvent, client: IMKTextInput) {
+        guard isRomajiModeActive else {
+            return
+        }
+        let shiftPressed = event.modifierFlags.contains(.shift)
+        if shiftPressed {
+            shiftKeyDownTime = event.timestamp
+            shiftKeyUsedAsModifier = false
+        } else {
+            let duration = event.timestamp - shiftKeyDownTime
+            if !shiftKeyUsedAsModifier
+                && shiftKeyDownTime > 0
+                && duration < Self.shiftAloneTapMaxDuration {
+                self.switchInputLanguage(.japanese, client: client)
+            }
+            shiftKeyDownTime = 0
+            shiftKeyUsedAsModifier = false
+        }
+    }
+
+    // 英字モードに入る条件
+    private func isUppercaseLetter(_ text: String?) -> Bool {
+        guard let text, !text.isEmpty else {
+            return false
+        }
+        return text.unicodeScalars.allSatisfy { ("A"..."Z").contains($0) }
+    }
+
     // swiftlint:disable:next cyclomatic_complexity
     @MainActor override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event, let client = sender as? IMKTextInput else {
             return false
         }
+        if event.type == .flagsChanged {
+            handleFlagsChanged(event, client: client)
+            return false
+        }
         guard event.type == .keyDown else {
             return false
+        }
+
+        let eventModifiers = KeyEventCore.ModifierFlag(from: event.modifierFlags)
+
+        // 英字モード中にShift修飾のkeyDownがきたらマーク(Shift単押し検出のため)
+        if self.isRomajiModeActive && eventModifiers == [.shift] {
+            self.shiftKeyUsedAsModifier = true
         }
 
         // カスタムプロンプトショートカットのチェック
@@ -279,7 +348,14 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             return true
         }
 
-        let eventModifiers = KeyEventCore.ModifierFlag(from: event.modifierFlags)
+        // 日本語モードで Shift+[a-z] が押されたらMarkedTextを保ったまま英字モードへ入る
+        if self.inputLanguage == .japanese,
+           self.romajiModeEnabled,
+           !self.romajiMode,
+           self.isUppercaseLetter(event.characters) {
+            self.switchInputLanguage(.english, client: client, romajiMode: true)
+        }
+
         let charactersForOptionDirectInput = event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.option))
         if Config.OptionDirectFullWidthInput().value,
            let text = OptionDirectInputResolver.resolve(
@@ -311,6 +387,10 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
                     self.switchInputLanguage(.english, client: client)
                     return true
                 }
+            } else if self.inputState == .composing && !self.segmentsManager.isEmpty {
+                // composing中（markedTextあり）の英数キーシングルタップ
+                self.switchInputLanguage(.english, client: client, romajiMode: true)
+                return true
             }
         }
 
@@ -361,7 +441,8 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             inputLanguage: self.inputLanguage,
             liveConversionEnabled: Config.LiveConversion().value,
             enableDebugWindow: Config.DebugWindow().value,
-            enableSuggestion: aiBackendEnabled
+            enableSuggestion: aiBackendEnabled,
+            romajiMode: self.romajiMode
         )
         return handleClientAction(clientAction, clientActionCallback: clientActionCallback, client: client)
     }
@@ -543,12 +624,18 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
             if inputState != .replaceSuggestion {
                 self.replaceSuggestionWindow.orderOut(nil)
             }
-            if inputState == .none {
+            // 言語モード切替
+            if self.isRomajiModeActive && [.none, .previewing, .selecting].contains(inputState) {
+                self.switchInputLanguage(.japanese, client: client)
+            } else if inputState == .none {
                 self.switchInputLanguage(self.inputLanguage, client: client)
             }
             self.inputState = inputState
         case .basedOnBackspace(let ifIsEmpty, let ifIsNotEmpty), .basedOnSubmitCandidate(let ifIsEmpty, let ifIsNotEmpty):
             self.inputState = self.segmentsManager.isEmpty ? ifIsEmpty : ifIsNotEmpty
+            if self.isRomajiModeActive && self.inputState == .none {
+                self.switchInputLanguage(.japanese, client: client)
+            }
         }
 
         self.refreshMarkedText()
@@ -557,8 +644,9 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
         return true
     }
 
-    @MainActor func switchInputLanguage(_ language: InputLanguage, client: IMKTextInput) {
+    @MainActor func switchInputLanguage(_ language: InputLanguage, client: IMKTextInput, romajiMode: Bool = false) {
         self.inputLanguage = language
+        self.romajiMode = (language == .english) ? romajiMode : false
         client.overrideKeyboard(withKeyboardNamed: Config.KeyboardLayout().value.layoutIdentifier)
         switch language {
         case .english:

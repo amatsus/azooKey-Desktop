@@ -227,3 +227,16 @@ extension Config {
         public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.aiBackend"
     }
 }
+
+extension Config {
+    public struct ShiftKeyAction: CustomCodableConfigItem {
+        public enum Value: String, Codable, Equatable, Hashable, Sendable {
+            case `default`
+            case romajimode
+        }
+
+        public init() {}
+        public static let `default`: Value = .default
+        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.shiftKeyAction"
+    }
+}

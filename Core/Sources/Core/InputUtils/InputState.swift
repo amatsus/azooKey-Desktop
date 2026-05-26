@@ -18,7 +18,8 @@ public enum InputState: Sendable, Hashable {
         inputLanguage: InputLanguage,
         liveConversionEnabled: Bool,
         enableDebugWindow: Bool,
-        enableSuggestion: Bool
+        enableSuggestion: Bool,
+        romajiMode: Bool = false
     ) -> (ClientAction, ClientActionCallback) {
         if event.modifierFlags.contains(.command) {
             return (.fallthrough, .fallthrough)
@@ -62,8 +63,9 @@ public enum InputState: Sendable, Hashable {
                 case .japanese:
                     return (.appendPieceToMarkedText(string), .transition(.composing))
                 case .english:
-                    // 連結する
-                    return (.insertWithoutMarkedText(string.inputString(preferIntention: true)), .fallthrough)
+                    return romajiMode
+                        ? (.appendPieceToMarkedText(string), .transition(.composing))
+                        : (.insertWithoutMarkedText(string.inputString(preferIntention: true)), .fallthrough)
                 }
             case .deadKey(let diacritic):
                 if inputLanguage == .english {
@@ -146,14 +148,20 @@ public enum InputState: Sendable, Hashable {
                     return (.commitMarkedText, .transition(.none))
                 }
             case .escape:
-                return (.stopComposition, .transition(.none))
-            case .space:
-                if inputLanguage == .english {
+                return inputLanguage == .english
+                    ? (.selectInputLanguage(.japanese), .fallthrough)
+                    : (.stopComposition, .transition(.none))
+            case .space(let isFullSpace):
+                switch (event.modifierFlags.contains(.shift), inputLanguage) {
+                case (true, .japanese):
+                    let space = isFullSpace ? " " : "　"
+                    return (.appendToMarkedText(space), .fallthrough)
+                case (false, .english):
                     return (.appendToMarkedText(" "), .fallthrough)
-                } else if liveConversionEnabled {
-                    return (.enterCandidateSelectionMode, .transition(.selecting))
-                } else {
-                    return (.enterFirstCandidatePreviewMode, .transition(.previewing))
+                default:
+                    return liveConversionEnabled
+                        ? (.enterCandidateSelectionMode, .transition(.selecting))
+                        : (.enterFirstCandidatePreviewMode, .transition(.previewing))
                 }
             case let .function(function):
                 switch function {

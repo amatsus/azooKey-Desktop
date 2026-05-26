@@ -23,6 +23,7 @@ struct ConfigWindow: View {
     @ConfigState private var systemUserDictionary = Config.SystemUserDictionary()
     @ConfigState private var keyboardLayout = Config.KeyboardLayout()
     @ConfigState private var aiBackend = Config.AIBackendPreference()
+    @ConfigState private var shiftKeyAction = Config.ShiftKeyAction()
 
     @State private var selectedTab: Tab = .basic
     @State private var zenzaiProfileHelpPopover = false
@@ -488,6 +489,18 @@ struct ConfigWindow: View {
                     Text("、と．").tag(Config.PunctuationStyle.Value.periodAndToten)
                     Text("，と。").tag(Config.PunctuationStyle.Value.kutenAndComma)
                     Text("，と．").tag(Config.PunctuationStyle.Value.periodAndComma)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("Shiftキーの動作", selection: $shiftKeyAction) {
+                        Text("デフォルト").tag(Config.ShiftKeyAction.Value.default)
+                        Text("英字モードに入る").tag(Config.ShiftKeyAction.Value.romajimode)
+                    }
+                    if shiftKeyAction.value == .romajimode {
+                        Text("注意: このモードはカスタム入力テーブルのローマ字側にアルファベット大文字(A-Z)が定義されていると誤動作します。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             } header: {
                 Label("入力オプション", systemImage: "character.cursor.ibeam")
